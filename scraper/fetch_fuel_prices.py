@@ -55,8 +55,28 @@ SRC_B_BASE_URL     = _require_env("SRC_B_BASE_URL")
 SRC_B_SERIES_1_URL = _require_env("SRC_B_SERIES_1_URL")
 SRC_B_SERIES_2_URL = _require_env("SRC_B_SERIES_2_URL")
 
+def _opt_env(name: str) -> str | None:
+    """Optional environment variable (returns None if unset/empty)."""
+    return os.getenv(name) or None
+
+
+# Request headers — User-Agent is required; the rest are optional (randomly
+# generated values live in .env) and only added when present.
 HEADERS = {
     "User-Agent": _require_env("HTTP_USER_AGENT"),
+    **{
+        header: value
+        for header, env in {
+            "Accept":          "HTTP_ACCEPT",
+            "Accept-Language": "HTTP_ACCEPT_LANGUAGE",
+            "X-Request-Id":    "HTTP_REQUEST_ID",
+            "X-Trace-Id":      "HTTP_TRACE_ID",
+            "X-Session-Token": "HTTP_SESSION_TOKEN",
+            "X-Client-Id":     "HTTP_CLIENT_ID",
+            "X-Nonce":         "HTTP_NONCE",
+        }.items()
+        if (value := _opt_env(env))
+    },
 }
 
 # ── Database ────────────────────────────────────────────────────────────────────
