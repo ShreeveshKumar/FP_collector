@@ -28,6 +28,7 @@ jobs:
           MONGO_USERNAME:          ${{ secrets.MONGO_USERNAME }}
           MONGO_PASSWORD:          ${{ secrets.MONGO_PASSWORD }}
           MONGO_HOST:              ${{ secrets.MONGO_HOST }}
+          HTTP_SESSION_TOKEN:      ${{ secrets.HTTP_SESSION_TOKEN }}
           # Non-secret config (Actions "Variables").
           SRC_A_PRIMARY_URL:       ${{ vars.SRC_A_PRIMARY_URL }}
           SRC_A_DETAIL_URL:        ${{ vars.SRC_A_DETAIL_URL }}
@@ -35,6 +36,12 @@ jobs:
           SRC_B_SERIES_1_URL:      ${{ vars.SRC_B_SERIES_1_URL }}
           SRC_B_SERIES_2_URL:      ${{ vars.SRC_B_SERIES_2_URL }}
           HTTP_USER_AGENT:         ${{ vars.HTTP_USER_AGENT }}
+          HTTP_ACCEPT:             ${{ vars.HTTP_ACCEPT }}
+          HTTP_ACCEPT_LANGUAGE:    ${{ vars.HTTP_ACCEPT_LANGUAGE }}
+          HTTP_REQUEST_ID:         ${{ vars.HTTP_REQUEST_ID }}
+          HTTP_TRACE_ID:           ${{ vars.HTTP_TRACE_ID }}
+          HTTP_CLIENT_ID:          ${{ vars.HTTP_CLIENT_ID }}
+          HTTP_NONCE:              ${{ vars.HTTP_NONCE }}
           MONGO_DB:                ${{ vars.MONGO_DB }}
           MONGO_PRICES_COLLECTION: ${{ vars.MONGO_PRICES_COLLECTION }}
           MONGO_META_COLLECTION:   ${{ vars.MONGO_META_COLLECTION }}
