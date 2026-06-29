@@ -1,20 +1,41 @@
-name: Fetch US Fuel Prices
+name: Fuel Price Collector CI/CD
 
 on:
   push:
-    branches:
-      - main
+    branches: [ "main", "master" ]
   schedule:
-    - cron: "0 */6 * * *"   # every 6 hours (UTC)
-  workflow_dispatch:          # allow manual runs from the Actions tab
+    - cron: '0 */6 * * *' # Run every 6 hours (UTC)
+  workflow_dispatch:
 
 jobs:
-  fetch-prices:
+  run-job:
     runs-on: ubuntu-latest
+    environment: research
+    env:
+      SRC_A_PRIMARY_URL: ${{ secrets.SRC_A_PRIMARY_URL }}
+      SRC_A_DETAIL_URL: ${{ secrets.SRC_A_DETAIL_URL }}
+      SRC_B_API_KEY: ${{ secrets.SRC_B_API_KEY }}
+      SRC_B_BASE_URL: ${{ secrets.SRC_B_BASE_URL }}
+      SRC_B_SERIES_1_URL: ${{ secrets.SRC_B_SERIES_1_URL }}
+      SRC_B_SERIES_2_URL: ${{ secrets.SRC_B_SERIES_2_URL }}
+      HTTP_USER_AGENT: ${{ secrets.HTTP_USER_AGENT }}
+      HTTP_ACCEPT: ${{ secrets.HTTP_ACCEPT }}
+      HTTP_ACCEPT_LANGUAGE: ${{ secrets.HTTP_ACCEPT_LANGUAGE }}
+      HTTP_REQUEST_ID: ${{ secrets.HTTP_REQUEST_ID }}
+      HTTP_TRACE_ID: ${{ secrets.HTTP_TRACE_ID }}
+      HTTP_SESSION_TOKEN: ${{ secrets.HTTP_SESSION_TOKEN }}
+      HTTP_CLIENT_ID: ${{ secrets.HTTP_CLIENT_ID }}
+      HTTP_NONCE: ${{ secrets.HTTP_NONCE }}
+      MONGO_HOST: ${{ secrets.MONGO_HOST }}
+      MONGO_USERNAME: ${{ secrets.MONGO_USERNAME }}
+      MONGO_PASSWORD: ${{ secrets.MONGO_PASSWORD }}
+      MONGO_DB: ${{ secrets.MONGO_DB }}
+      MONGO_PRICES_COLLECTION: ${{ secrets.MONGO_PRICES_COLLECTION }}
+      MONGO_META_COLLECTION: ${{ secrets.MONGO_META_COLLECTION }}
+      MONGO_URI: ${{ secrets.MONGO_URI }} # optional — overrides the components above
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -22,30 +43,16 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint with flake8
+        run: |
+          pip install flake8
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
       - name: Run fuel price scraper
-        env:
-          # Secrets injected at runtime — never committed to source.
-          SRC_B_API_KEY:           ${{ secrets.SRC_B_API_KEY }}   # optional — richer data
-          MONGO_USERNAME:          ${{ secrets.MONGO_USERNAME }}
-          MONGO_PASSWORD:          ${{ secrets.MONGO_PASSWORD }}
-          MONGO_HOST:              ${{ secrets.MONGO_HOST }}
-          HTTP_SESSION_TOKEN:      ${{ secrets.HTTP_SESSION_TOKEN }}
-          # Non-secret config (Actions "Variables").
-          SRC_A_PRIMARY_URL:       ${{ vars.SRC_A_PRIMARY_URL }}
-          SRC_A_DETAIL_URL:        ${{ vars.SRC_A_DETAIL_URL }}
-          SRC_B_BASE_URL:          ${{ vars.SRC_B_BASE_URL }}
-          SRC_B_SERIES_1_URL:      ${{ vars.SRC_B_SERIES_1_URL }}
-          SRC_B_SERIES_2_URL:      ${{ vars.SRC_B_SERIES_2_URL }}
-          HTTP_USER_AGENT:         ${{ vars.HTTP_USER_AGENT }}
-          HTTP_ACCEPT:             ${{ vars.HTTP_ACCEPT }}
-          HTTP_ACCEPT_LANGUAGE:    ${{ vars.HTTP_ACCEPT_LANGUAGE }}
-          HTTP_REQUEST_ID:         ${{ vars.HTTP_REQUEST_ID }}
-          HTTP_TRACE_ID:           ${{ vars.HTTP_TRACE_ID }}
-          HTTP_CLIENT_ID:          ${{ vars.HTTP_CLIENT_ID }}
-          HTTP_NONCE:              ${{ vars.HTTP_NONCE }}
-          MONGO_DB:                ${{ vars.MONGO_DB }}
-          MONGO_PRICES_COLLECTION: ${{ vars.MONGO_PRICES_COLLECTION }}
-          MONGO_META_COLLECTION:   ${{ vars.MONGO_META_COLLECTION }}
-        run: python scraper/fetch_fuel_prices.py
+        run: |
+          python scraper/fetch_fuel_prices.py
