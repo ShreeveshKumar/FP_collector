@@ -1,0 +1,41 @@
+name: Fetch US Fuel Prices
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  fetch-prices:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run fuel price scraper
+        env:
+          # Secrets injected at runtime — never committed to source.
+          SRC_B_API_KEY:           ${{ secrets.SRC_B_API_KEY }}   # optional — richer data
+          MONGO_USERNAME:          ${{ secrets.MONGO_USERNAME }}
+          MONGO_PASSWORD:          ${{ secrets.MONGO_PASSWORD }}
+          MONGO_HOST:              ${{ secrets.MONGO_HOST }}
+          # Non-secret config (Actions "Variables").
+          SRC_A_PRIMARY_URL:       ${{ vars.SRC_A_PRIMARY_URL }}
+          SRC_A_DETAIL_URL:        ${{ vars.SRC_A_DETAIL_URL }}
+          SRC_B_BASE_URL:          ${{ vars.SRC_B_BASE_URL }}
+          SRC_B_SERIES_1_URL:      ${{ vars.SRC_B_SERIES_1_URL }}
+          SRC_B_SERIES_2_URL:      ${{ vars.SRC_B_SERIES_2_URL }}
+          HTTP_USER_AGENT:         ${{ vars.HTTP_USER_AGENT }}
+          MONGO_DB:                ${{ vars.MONGO_DB }}
+          MONGO_PRICES_COLLECTION: ${{ vars.MONGO_PRICES_COLLECTION }}
+          MONGO_META_COLLECTION:   ${{ vars.MONGO_META_COLLECTION }}
+        run: python scraper/fetch_fuel_prices.py
