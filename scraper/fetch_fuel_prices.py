@@ -10,8 +10,11 @@ Logic:
      configured via environment variables — nothing is hard-coded):
        - Source A — national + all-region averages (HTML)
        - Source B — official weekly retail price series (JSON API)
-  4. Backfill any missing per-region grade with the national average for that
-     grade, and record the substitution so it stays auditable.
+  4. Guarantee full coverage of all 56 US regions (50 states + DC + the five
+     inhabited territories/islands): any region the source omits is synthesised
+     and any missing grade is backfilled from the national average — every
+     substitution is flagged (backfilled / region_synthesized) so it stays
+     auditable.
   5. Persist results to MongoDB (one document per day, plus a rolling
      "latest" pointer and the last-fetch marker).
 """
@@ -88,14 +91,19 @@ _META_ID           = "last_fetch"
 
 
 def get_db():
-    """Build a Mongo connection from credentials held only in the environment."""
-    user = quote_plus(_require_env("MONGO_USERNAME"))
-    pwd  = quote_plus(_require_env("MONGO_PASSWORD"))
-    host = _require_env("MONGO_HOST")
-    # Allow a full pre-built URI to override the components if provided.
-    uri = os.getenv("MONGO_URI") or (
-        f"mongodb+srv://{user}:{pwd}@{host}/?retryWrites=true&w=majority"
-    )
+    """
+    Build a Mongo connection from credentials held only in the environment.
+
+    Prefer a full MONGO_URI when provided; otherwise assemble one from the
+    individual MONGO_USERNAME / MONGO_PASSWORD / MONGO_HOST components. The
+    components are only required when MONGO_URI is absent.
+    """
+    uri = _opt_env("MONGO_URI")
+    if not uri:
+        user = quote_plus(_require_env("MONGO_USERNAME"))
+        pwd  = quote_plus(_require_env("MONGO_PASSWORD"))
+        host = _require_env("MONGO_HOST")
+        uri = f"mongodb+srv://{user}:{pwd}@{host}/?retryWrites=true&w=majority"
     return MongoClient(uri, serverSelectionTimeoutMS=15000)[MONGO_DB]
 
 
@@ -233,6 +241,86 @@ def _safe_float(val: str) -> float | None:
 
 PRICE_FIELDS = ("regular", "mid_grade", "premium", "diesel")
 
+# Canonical roster — every US region we must cover: 50 states, the federal
+# district, and the five inhabited territories/islands. Any region the source
+# omits is synthesised and backfilled from the national average so coverage is
+# always complete and auditable.
+US_REGIONS = (
+    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado",
+    "Connecticut", "Delaware", "Florida", "Georgia", "Hawaii", "Idaho",
+    "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine",
+    "Maryland", "Massachusetts", "Michigan", "Minnesota", "Mississippi",
+    "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", "New Jersey",
+    "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio",
+    "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina",
+    "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia",
+    "Washington", "West Virginia", "Wisconsin", "Wyoming",
+    # Federal district
+    "District of Columbia",
+    # Inhabited US territories / islands
+    "Puerto Rico", "Guam", "U.S. Virgin Islands", "American Samoa",
+    "Northern Mariana Islands",
+)
+
+
+def _norm_region(name: str) -> str:
+    """Loose key for matching region names across spelling/punctuation."""
+    return " ".join(str(name).strip().lower().replace(".", "").replace("'", "").split())
+
+
+# Map any recognised spelling/alias back to its canonical display name.
+CANON_BY_KEY = {_norm_region(name): name for name in US_REGIONS}
+CANON_BY_KEY.update({
+    _norm_region(alias): canonical
+    for alias, canonical in {
+        "washington dc":      "District of Columbia",
+        "washington d c":     "District of Columbia",
+        "dc":                 "District of Columbia",
+        "virgin islands":     "U.S. Virgin Islands",
+        "us virgin islands":  "U.S. Virgin Islands",
+        "northern marianas":  "Northern Mariana Islands",
+        "cnmi":               "Northern Mariana Islands",
+    }.items()
+})
+
+
+def ensure_full_coverage(
+    regions: list[dict],
+    national: dict,
+) -> tuple[list[dict], list[str]]:
+    """
+    Guarantee every entry in US_REGIONS is present.
+
+    Existing rows get their display name canonicalised; any roster region the
+    source omitted is appended with empty prices (later filled from the national
+    average) and flagged ``_synthesized`` so it stays auditable. Returns the
+    region list plus the names of every region that had to be synthesised.
+    """
+    by_key: dict[str, dict] = {}
+    for r in regions:
+        key = _norm_region(r.get("region", ""))
+        canonical = CANON_BY_KEY.get(key)
+        if canonical:
+            r["region"] = canonical          # normalise display name
+            key = _norm_region(canonical)    # …and dedup under the canonical key
+        by_key[key] = r
+
+    synthesized: list[str] = []
+    for canonical in US_REGIONS:
+        key = _norm_region(canonical)
+        if key not in by_key:
+            entry = {
+                "region": canonical,
+                "regular": None, "mid_grade": None,
+                "premium": None, "diesel": None,
+                "_synthesized": True,
+            }
+            regions.append(entry)
+            by_key[key] = entry
+            synthesized.append(canonical)
+
+    return regions, synthesized
+
 
 def fill_missing_with_national(
     regions: list[dict],
@@ -336,6 +424,7 @@ def build_observations(
     for region in a_regions:
         region_name = region.get("region", "?")
         patched = set(region.get("_patched_fields", []))
+        synthesized = bool(region.get("_synthesized"))
         for grade in PRICE_FIELDS:
             price = region.get(grade)
             if price is None:
@@ -345,6 +434,9 @@ def build_observations(
                 grade=grade, price=price,
                 backfilled=grade in patched,
                 backfill_source="national_average" if grade in patched else None,
+                # True when the whole region was absent from the source and
+                # synthesised from the national average for full coverage.
+                region_synthesized=synthesized,
             ))
 
     # Source B — weekly national series (one row per series)
@@ -421,13 +513,9 @@ def main():
         print(f"     [warn] source A regions failed: {exc}")
         a_regions = []
 
-    # ── Fill missing regional prices with national average ─────────────────────
-    print("  → Patching missing regional prices with national average …")
-    a_regions, patch_log = fill_missing_with_national(a_regions, a_national)
-    if not patch_log:
-        print("     (no gaps — all regional prices present)")
-
     # ── Source B ───────────────────────────────────────────────────────────────
+    # Fetched before backfilling so its national figures can serve as a fallback
+    # when source A's national banner is unavailable.
     print("  → source B weekly series 1 …")
     try:
         b_series_1 = fetch_src_b_series(SRC_B_SERIES_1_URL, "series_1_national")
@@ -443,6 +531,28 @@ def main():
     except Exception as exc:
         print(f"     [warn] source B series 2 failed: {exc}")
         b_series_2 = {}
+
+    # ── National average used for backfill (source A, with source B fallback) ──
+    effective_national = dict(a_national)
+    if effective_national.get("regular") is None and b_series_1:
+        effective_national["regular"] = b_series_1.get("price")
+    if effective_national.get("diesel") is None and b_series_2:
+        effective_national["diesel"] = b_series_2.get("price")
+
+    # ── Guarantee every state / territory / island is present ──────────────────
+    print(f"  → Ensuring full coverage of all {len(US_REGIONS)} US regions …")
+    a_regions, synthesized = ensure_full_coverage(a_regions, effective_national)
+    if synthesized:
+        print(f"     {len(synthesized)} region(s) missing from source, "
+              f"synthesised from national avg: {', '.join(synthesized)}")
+    else:
+        print("     (source already covered every region)")
+
+    # ── Fill missing regional prices with national average ─────────────────────
+    print("  → Patching missing regional prices with national average …")
+    a_regions, patch_log = fill_missing_with_national(a_regions, effective_national)
+    if not patch_log:
+        print("     (no gaps — all regional prices present)")
 
     # ── Flatten into tidy records & persist ────────────────────────────────────
     records = build_observations(
