@@ -10,7 +10,7 @@ on:
 jobs:
   run-job:
     runs-on: ubuntu-latest
-    environment: production
+    environment: research
     env:
       SRC_A_PRIMARY_URL: ${{ secrets.SRC_A_PRIMARY_URL }}
       SRC_A_DETAIL_URL: ${{ secrets.SRC_A_DETAIL_URL }}
