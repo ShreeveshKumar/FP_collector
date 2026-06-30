@@ -113,14 +113,20 @@ def ensure_indexes(db):
     analytical / research queries (by day, source, region, grade, period).
     """
     coll = db[MONGO_PRICES_COLL]
-    # One observation is uniquely identified by this tuple — keeps re-runs
-    # idempotent and prevents duplicate rows for the same day.
-    coll.create_index(
-        [("date", 1), ("source", 1), ("scope", 1), ("region", 1),
-         ("grade", 1), ("series", 1)],
-        unique=True,
-        name="uniq_observation",
-    )
+    # One observation is uniquely identified by this tuple. ``fetched_at`` is
+    # part of the key so every run appends a fresh generation of records (a full
+    # scrape history) instead of overwriting the same day — while still keeping
+    # a single run idempotent if it has to retry.
+    desired_key = [
+        ("date", 1), ("source", 1), ("scope", 1), ("region", 1),
+        ("grade", 1), ("series", 1), ("fetched_at", 1),
+    ]
+    # Migrate: the original index keyed only on the day (without fetched_at)
+    # would reject these new per-run rows, so drop it if it's still around.
+    existing = coll.index_information().get("uniq_observation")
+    if existing and existing.get("key") != [list(k) for k in desired_key]:
+        coll.drop_index("uniq_observation")
+    coll.create_index(desired_key, unique=True, name="uniq_observation")
     coll.create_index([("date", 1)], name="by_date")
     coll.create_index([("source", 1), ("grade", 1)], name="by_source_grade")
     coll.create_index([("region", 1), ("grade", 1)], name="by_region_grade")
@@ -454,19 +460,25 @@ def build_observations(
 
 
 def persist_observations(db, records: list[dict]):
-    """Upsert each observation keyed on its identifying tuple (idempotent)."""
+    """
+    Append this run's observations. Keyed on the identifying tuple *plus*
+    ``fetched_at`` so each run adds a new generation of records rather than
+    overwriting the previous one — the differing timestamp keeps the full
+    scrape history. (Idempotent only within a single run's retry.)
+    """
     coll = db[MONGO_PRICES_COLL]
     written = 0
     for rec in records:
         if rec.get("price") is None:
             continue
         key = {
-            "date":   rec["date"],
-            "source": rec["source"],
-            "scope":  rec["scope"],
-            "region": rec.get("region"),
-            "grade":  rec.get("grade"),
-            "series": rec.get("series"),
+            "date":       rec["date"],
+            "source":     rec["source"],
+            "scope":      rec["scope"],
+            "region":     rec.get("region"),
+            "grade":      rec.get("grade"),
+            "series":     rec.get("series"),
+            "fetched_at": rec["fetched_at"],
         }
         coll.update_one(key, {"$set": rec}, upsert=True)
         written += 1
