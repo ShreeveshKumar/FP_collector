@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fuel Prices Dashboard</title>
+    <style>
+        :root {
+            --bg: #0f1a24;
+            --panel: #16232e;
+            --accent: #00ed64;
+            --text: #e8eef2;
+            --muted: #8ba0b0;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            color: var(--text);
+            background:
+                radial-gradient(1200px 600px at 20% -10%, rgba(0, 237, 100, .12), transparent 60%),
+                radial-gradient(1000px 500px at 110% 10%, rgba(33, 49, 60, .8), transparent 55%),
+                linear-gradient(180deg, #0b141c 0%, #0f1a24 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 32px;
+            max-width: 720px;
+        }
+
+        header h1 {
+            margin: 0 0 8px;
+            font-size: clamp(1.8rem, 4vw, 2.6rem);
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        header .accent {
+            color: var(--accent);
+        }
+
+        header p {
+            margin: 0;
+            color: var(--muted);
+            font-size: 1rem;
+            line-height: 1.5;
+        }
+
+        .chart-card {
+            background: var(--panel);
+            border: 1px solid rgba(255, 255, 255, .06);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow:
+                0 10px 40px rgba(0, 0, 0, .45),
+                0 2px 10px rgba(70, 76, 79, .2);
+            width: 100%;
+            max-width: 720px;
+        }
+
+        .chart-card iframe {
+            display: block;
+            width: 100%;
+            aspect-ratio: 4 / 3;
+            height: auto;
+            border: none;
+            border-radius: 8px;
+            background: #21313C;
+        }
+
+        footer {
+            margin-top: 28px;
+            color: var(--muted);
+            font-size: .85rem;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Fuel Prices <span class="accent">Dashboard</span></h1>
+        <p>Live pricing insights, auto-refreshed straight from the source.</p>
+    </header>
+
+    <div class="chart-card">
+        <iframe
+            src="https://charts.mongodb.com/charts-fsp_rd_01-nxlorzz/embed/charts?id=0c6b9129-686c-4e12-9be9-bc1bd88c3551&maxDataAge=14400&theme=dark&autoRefresh=true"
+            loading="lazy"
+            title="Fuel prices chart">
+        </iframe>
+    </div>
+
+    <footer>Data updates automatically &middot; Powered by MongoDB Charts</footer>
+
+</body>
+</html>

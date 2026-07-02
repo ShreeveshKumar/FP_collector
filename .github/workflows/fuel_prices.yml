@@ -18,6 +18,9 @@ jobs:
       SRC_B_BASE_URL: ${{ secrets.SRC_B_BASE_URL }}
       SRC_B_SERIES_1_URL: ${{ secrets.SRC_B_SERIES_1_URL }}
       SRC_B_SERIES_2_URL: ${{ secrets.SRC_B_SERIES_2_URL }}
+      # Optional per-state fallback source; falls back to the scraper's built-in
+      # default when the secret is unset.
+      SRC_C_FALLBACK_URL: ${{ secrets.SRC_C_FALLBACK_URL || 'https://www.gasbuddy.com/usa' }}
       HTTP_USER_AGENT: ${{ secrets.HTTP_USER_AGENT }}
       HTTP_ACCEPT: ${{ secrets.HTTP_ACCEPT }}
       HTTP_ACCEPT_LANGUAGE: ${{ secrets.HTTP_ACCEPT_LANGUAGE }}

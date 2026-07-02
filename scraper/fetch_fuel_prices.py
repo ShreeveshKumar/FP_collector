@@ -6,20 +6,27 @@ Triggered on every push via GitHub Actions.
 Logic:
   1. Load the last-fetch timestamp from the database (if it exists).
   2. If today's date is present AND the last fetch was < 6 hours ago → skip.
-  3. Otherwise pull from two upstream sources (all endpoints/credentials are
+  3. Otherwise pull from the upstream sources (all endpoints/credentials are
      configured via environment variables — nothing is hard-coded):
-       - Source A — national + all-region averages (HTML)
-       - Source B — official weekly retail price series (JSON API)
+       - Source A — national + all-region averages (HTML)      [primary]
+       - Source C — per-state fallback averages (HTML)         [fills A's gaps]
+       - Source B — official weekly retail price series (JSON API) [last resort]
   4. Guarantee full coverage of all 56 US regions (50 states + DC + the five
-     inhabited territories/islands): any region the source omits is synthesised
-     and any missing grade is backfilled from the national average — every
-     substitution is flagged (backfilled / region_synthesized) so it stays
-     auditable.
+     inhabited territories/islands) using a tiered strategy so real per-state
+     data is always preferred over synthetic figures:
+       a. Source A supplies the per-state prices.
+       b. Any state Source A omitted (or any missing 'regular' price) is filled
+          from Source C — a second, independent all-50-states source.
+       c. Only whatever is *still* missing is backfilled from the national
+          average (Source A's banner, or Source B as a last resort).
+     Every substitution is flagged (fallback / backfilled / region_synthesized)
+     so it stays auditable.
   5. Persist results to MongoDB (one document per day, plus a rolling
      "latest" pointer and the last-fetch marker).
 """
 
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
@@ -57,6 +64,12 @@ SRC_B_API_KEY      = os.getenv("SRC_B_API_KEY", "DEMO_KEY")
 SRC_B_BASE_URL     = _require_env("SRC_B_BASE_URL")
 SRC_B_SERIES_1_URL = _require_env("SRC_B_SERIES_1_URL")
 SRC_B_SERIES_2_URL = _require_env("SRC_B_SERIES_2_URL")
+
+# Source C — per-state fallback (HTML). Used only to fill states the primary
+# source (A) omitted, before falling back to the national average. Ships with a
+# sane default so the fallback still works even when it is left unconfigured.
+SRC_C_FALLBACK_URL = os.getenv("SRC_C_FALLBACK_URL", "https://www.gasbuddy.com/usa")
+
 
 def _opt_env(name: str) -> str | None:
     """Optional environment variable (returns None if unset/empty)."""
@@ -180,23 +193,49 @@ def scrape_src_a_national() -> dict:
         "diesel":    ["diesel"],
     }
 
-    # Strategy A — look for labelled price cards
-    cards = soup.select(".price-index__card, .card-gas")
-    for card in cards:
-        label_el = card.select_one(".card-title, .type, h3, h4, .label")
-        price_el  = card.select_one(".price, .numb, [class*='price']")
-        if not (label_el and price_el):
+    # Strategy A — the national averages table. Its header row is
+    # (blank) | Regular | Mid-Grade | Premium | Diesel | E85 and the first data
+    # row ("Current Avg.") holds today's national numbers.
+    for table in soup.select("table"):
+        heads = [th.get_text(strip=True).lower() for th in table.select("th")]
+        if not any("regular" in h for h in heads):
             continue
-        label = label_el.get_text(strip=True).lower()
-        price = price_el.get_text(strip=True).replace("$", "").strip()
-        for key, aliases in labels_map.items():
-            if any(a in label for a in aliases):
-                try:
-                    prices[key] = float(price)
-                except ValueError:
-                    pass
+        for tr in table.select("tr"):
+            cells = [td.get_text(strip=True) for td in tr.select("td")]
+            if not cells:
+                continue
+            row_label = cells[0].lower()
+            if "current" not in row_label and "today" not in row_label:
+                continue
+            # cells line up with the header columns (both include the label col)
+            for head, cell in zip(heads[1:], cells[1:]):
+                for key, aliases in labels_map.items():
+                    if any(a in head for a in aliases):
+                        val = _safe_float(cell)
+                        if val is not None:
+                            prices[key] = val
+            break
+        if prices:
+            break
 
-    # Strategy B — fallback: first .numb span is the national regular average
+    # Strategy B — look for labelled price cards (legacy layout)
+    if not prices:
+        cards = soup.select(".price-index__card, .card-gas")
+        for card in cards:
+            label_el = card.select_one(".card-title, .type, h3, h4, .label")
+            price_el  = card.select_one(".price, .numb, [class*='price']")
+            if not (label_el and price_el):
+                continue
+            label = label_el.get_text(strip=True).lower()
+            price = price_el.get_text(strip=True).replace("$", "").strip()
+            for key, aliases in labels_map.items():
+                if any(a in label for a in aliases):
+                    try:
+                        prices[key] = float(price)
+                    except ValueError:
+                        pass
+
+    # Strategy C — fallback: first .numb span is the national regular average
     if not prices:
         spans = soup.select(".numb")
         if spans:
@@ -286,6 +325,8 @@ CANON_BY_KEY.update({
         "us virgin islands":  "U.S. Virgin Islands",
         "northern marianas":  "Northern Mariana Islands",
         "cnmi":               "Northern Mariana Islands",
+        # Source C labels a couple of regions differently.
+        "san juan":           "Puerto Rico",
     }.items()
 })
 
@@ -364,6 +405,98 @@ def fill_missing_with_national(
     return regions, patches
 
 
+# ── Source C scraper (per-state fallback) ───────────────────────────────────────
+
+
+def scrape_src_c_regions() -> list[dict]:
+    """
+    Fallback per-state scrape (source C).
+
+    Yields the average *regular* price for every state, DC and Puerto Rico from a
+    second, independent all-50-states source. Used only to fill states the
+    primary source (A) omitted before any national-average backfill, so real
+    per-state data is preferred over synthetic figures.
+    """
+    resp = requests.get(SRC_C_FALLBACK_URL, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    rows: list[dict] = []
+    # Each state is an <a href="/usa/xx"> block containing a ".siteName" label
+    # and its current average price as the first decimal number in the block.
+    for anchor in soup.select('a[href^="/usa/"]'):
+        name_el = anchor.select_one(".siteName")
+        if not name_el:
+            continue
+        name = name_el.get_text(strip=True)
+        match = re.search(r"\d+\.\d{2,3}", anchor.get_text(" ", strip=True))
+        if not (name and match):
+            continue
+        rows.append({
+            "region":    name,
+            "regular":   _safe_float(match.group()),
+            "mid_grade": None,
+            "premium":   None,
+            "diesel":    None,
+        })
+    return rows
+
+
+def merge_fallback_regions(
+    primary: list[dict],
+    fallback: list[dict],
+) -> tuple[list[dict], int, int]:
+    """
+    Fill gaps in the primary per-state data with a secondary source.
+
+    Adds any region missing from the primary source and, for regions already
+    present, fills a still-missing price field. Every value taken from the
+    fallback is flagged (``_fallback_fields`` / ``_fallback_region``) so it stays
+    auditable. Returns the merged list plus (regions_added, fields_filled).
+    """
+    by_key: dict[str, dict] = {}
+    for r in primary:
+        key = _norm_region(r.get("region", ""))
+        canonical = CANON_BY_KEY.get(key)
+        if canonical:
+            r["region"] = canonical
+            key = _norm_region(canonical)
+        by_key[key] = r
+
+    added = filled = 0
+    for fb in fallback:
+        key = _norm_region(fb.get("region", ""))
+        canonical = CANON_BY_KEY.get(key)
+        name = canonical or fb.get("region", "")
+        if canonical:
+            key = _norm_region(canonical)
+
+        existing = by_key.get(key)
+        if existing is None:
+            entry = {
+                "region":    name,
+                "regular":   fb.get("regular"),
+                "mid_grade": fb.get("mid_grade"),
+                "premium":   fb.get("premium"),
+                "diesel":    fb.get("diesel"),
+                "_fallback_fields": [
+                    f for f in PRICE_FIELDS if fb.get(f) is not None
+                ],
+                "_fallback_region": True,
+            }
+            primary.append(entry)
+            by_key[key] = entry
+            added += 1
+        else:
+            for field in PRICE_FIELDS:
+                if existing.get(field) is None and fb.get(field) is not None:
+                    existing[field] = fb.get(field)
+                    existing.setdefault("_fallback_fields", []).append(field)
+                    filled += 1
+
+    return primary, added, filled
+
+
 # ── Source B fetcher ────────────────────────────────────────────────────────────
 
 
@@ -426,23 +559,36 @@ def build_observations(
             grade=grade, price=price, backfilled=False,
         ))
 
-    # Source A — regional averages (one row per region per grade)
+    # Source A — regional averages (one row per region per grade). Note some
+    # values may have come from the source C fallback or the national average;
+    # the provenance flags below keep every substitution auditable.
     for region in a_regions:
         region_name = region.get("region", "?")
         patched = set(region.get("_patched_fields", []))
+        from_fallback = set(region.get("_fallback_fields", []))
         synthesized = bool(region.get("_synthesized"))
+        fallback_region = bool(region.get("_fallback_region"))
         for grade in PRICE_FIELDS:
             price = region.get(grade)
             if price is None:
                 continue
+            is_fallback = grade in from_fallback
             records.append(base(
-                source="src_a", scope="regional", region=region_name,
+                # Real per-state fallback data is attributed to source C; the
+                # national-average backfill stays attributed to source A.
+                source="src_c" if is_fallback else "src_a",
+                scope="regional", region=region_name,
                 grade=grade, price=price,
                 backfilled=grade in patched,
                 backfill_source="national_average" if grade in patched else None,
-                # True when the whole region was absent from the source and
-                # synthesised from the national average for full coverage.
+                # True when this grade came from the source C fallback because
+                # the primary source omitted it.
+                fallback=is_fallback,
+                fallback_source="src_c" if is_fallback else None,
+                # True when the whole region was absent from the primary source
+                # and had to be supplied by the fallback or synthesised.
                 region_synthesized=synthesized,
+                region_fallback=fallback_region,
             ))
 
     # Source B — weekly national series (one row per series)
@@ -524,6 +670,25 @@ def main():
     except Exception as exc:
         print(f"     [warn] source A regions failed: {exc}")
         a_regions = []
+
+    # ── Source C (per-state fallback) ────────────────────────────────────────────
+    # Fill any state the primary source missed with real per-state data from a
+    # second, independent all-50-states source *before* the national-average
+    # backfill — so synthetic figures are only ever a last resort.
+    print("  → source C per-state fallback …")
+    try:
+        c_regions = scrape_src_c_regions()
+        print(f"     {len(c_regions)} regions from fallback source")
+    except Exception as exc:
+        print(f"     [warn] source C fallback failed: {exc}")
+        c_regions = []
+
+    a_regions, fb_added, fb_filled = merge_fallback_regions(a_regions, c_regions)
+    if fb_added or fb_filled:
+        print(f"     filled {fb_added} missing region(s) + "
+              f"{fb_filled} missing price(s) from fallback")
+    else:
+        print("     (nothing to fill — primary source was complete)")
 
     # ── Source B ───────────────────────────────────────────────────────────────
     # Fetched before backfilling so its national figures can serve as a fallback
